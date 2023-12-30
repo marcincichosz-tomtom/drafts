@@ -3,6 +3,12 @@ import numpy as np
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from PIL import Image
 
+def resize_image(input_image_path, output_image_path, size):
+    with Image.open(input_image_path) as img:
+        img = img.resize(size, Image.BILINEAR)
+        img.save(output_image_path)
+
+
 def geotiff_to_pgw_png(input_geotiff, output_pgw, output_png):
 
     # Read the GeoTIFF file
@@ -49,7 +55,35 @@ def geotiff_to_pgw_png(input_geotiff, output_pgw, output_png):
         # Create the .png file
         img = Image.fromarray(out_image.astype('uint8'))
         img.save(output_png)
+        # Example usage
+        resize_image(output_png, '/home/marcin/repos/drafts/tiff/utrecht/output2.png', (1000, 1000))
+
+
+def geotiff_to_pgw(input_geotiff):
+
+    # Read the GeoTIFF file
+    with rasterio.open(input_geotiff) as src:
+        # Convert the transform to WGS84
+        transform = src.transform
+        print(transform)
+        crs = src.crs
+        new_crs = rasterio.crs.CRS.from_string("EPSG:4326")  # WGS84
+
+        transform, width, height = calculate_default_transform(crs, new_crs, src.width, src.height, *src.bounds)
+
+        # Write the .pgw file
+        gdal_coeffs = transform.to_gdal()
+        world_file_coeffs = [gdal_coeffs[1], gdal_coeffs[2], gdal_coeffs[4], gdal_coeffs[5], gdal_coeffs[0], gdal_coeffs[3]]
+        return world_file_coeffs
+
+
 
 # Example usage
-
-geotiff_to_pgw_png('/home/marcin/repos/drafts/tiff/utrecht/tile_1.tif', '/home/marcin/repos/drafts/tiff/utrecht/output.pgw', '/home/marcin/repos/drafts/tiff/utrecht/output.png')
+# init timer
+import time
+start_time = time.time()
+world_file_coeffs = geotiff_to_pgw('/home/marcin/repos/drafts/tiff/utrecht/tile_1.tif')
+end_time = time.time()
+print("Time elapsed: ", end_time - start_time)
+with open('/home/marcin/repos/drafts/tiff/utrecht/output3.pgw', 'w') as pgw:
+    pgw.write('\n'.join([str(i) for i in world_file_coeffs]))
