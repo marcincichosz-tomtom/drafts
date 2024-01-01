@@ -1,11 +1,10 @@
 import os
 from shapely.geometry import LineString, box
-from shapely.ops import unary_union, transform, split
+from shapely.ops import unary_union, transform, split, linemerge
 from shapely import wkt
 import pyproj
 
-from matplotlib import pyplot as plt
-
+from shapely.geometry import LineString
 import pandas as pd
 import geopandas as gpd
 
@@ -44,32 +43,6 @@ def convert_wgs84_to_utm(wkt_geometry):
     except Exception as e:
         print(f"Error: {e}")
         return None
-
-
-def split_and_classify(supporting_session_traj, map_segment, buffer):
-    if map_segment is not None:
-        session_name, count, bearing, reference_segment = map_segment
-        poly, split_lines = splitting(supporting_session_traj.wkt, buffer, reference_segment.wkt)
-        inside_lines = []
-        outside_lines = []
-        for s_line in split_lines:
-            if poly.contains(s_line):
-                inside_lines.append(s_line)
-            else:
-                outside_lines.append(s_line)
-        return inside_lines, outside_lines
-    else:
-        return [], []
-
-#@functools.lru_cache(maxsize=None)
-def splitting(supporting_session_traj_wkt, buffer, reference_segment_wkt):
-    supporting_session_traj = wkt.loads(supporting_session_traj_wkt)
-    reference_segment = wkt.loads(reference_segment_wkt)
-    
-    poly = reference_segment.buffer(buffer)
-    split_lines = split(supporting_session_traj, poly)
-    return poly, split_lines
-
 
 def extract_datetime_from_string(input_string):
     try:
@@ -110,7 +83,28 @@ def read_and_create_geodf(csv_file_path, session_names, number_of_sessions=0):
         
     return filtered_geodf
 
-from shapely.geometry import LineString
+def splitting(supporting_session_traj_wkt, buffer, reference_segment_wkt):
+    supporting_session_traj = wkt.loads(supporting_session_traj_wkt)
+    reference_segment = wkt.loads(reference_segment_wkt)
+    
+    poly = reference_segment.buffer(buffer)
+    split_lines = split(supporting_session_traj, poly)
+    return poly, split_lines
+
+def split_and_classify(supporting_session_traj, map_segment, buffer):
+    if map_segment is not None:
+        session_name, count, bearing, reference_segment = map_segment
+        poly, split_lines = splitting(supporting_session_traj.wkt, buffer, reference_segment.wkt)
+        inside_lines = []
+        outside_lines = []
+        for s_line in split_lines:
+            if poly.contains(s_line):
+                inside_lines.append(s_line)
+            else:
+                outside_lines.append(s_line)
+        return inside_lines, outside_lines
+    else:
+        return [], []
 
 def split_linestring_into_segments(linestring):
     # Initialize an empty list to hold the line segments
@@ -126,10 +120,6 @@ def split_linestring_into_segments(linestring):
 
     return segments
 
-
-import matplotlib.pyplot as plt
-
-# Draw reference_line
 def draw_line(line, color='black', label=None):
     x, y = line.xy
     plt.plot(x, y, color=color)
@@ -138,8 +128,7 @@ def draw_line(line, color='black', label=None):
     if label is not None:
         mid_point_index = len(x) // 2
         plt.text(x[mid_point_index], y[mid_point_index], label, fontsize=12)
-    
-# Draw polygon
+
 def draw_polygon(polygon, color='black', fill_color='', label=None):
     x, y = polygon.exterior.xy
     plt.fill(x, y, fill_color, alpha=0.3)  # fill the polygon with color
@@ -149,7 +138,6 @@ def draw_polygon(polygon, color='black', fill_color='', label=None):
     if label is not None:
         centroid = polygon.centroid
         plt.text(centroid.x, centroid.y, label, fontsize=12)
-
 
 def calculate_bearing(point1, point2):
     lon1 = math.radians(point1[0])
@@ -173,8 +161,7 @@ def calculate_bearing_for_segments(segments):
         bearings.append(bearing)
     return bearings
 
-
-def split_linestring_by_bearing(session_name, linestring, bearing_difference_threshold=10):
+def simplify_linestring_by_bearing(session_name, linestring, bearing_difference_threshold=10):
     # Split the LineString into segments
     segments = split_linestring_into_segments(linestring)
 
@@ -212,7 +199,6 @@ def split_linestring_by_bearing(session_name, linestring, bearing_difference_thr
 
     return line_sections
 
-
 def split_list_of_tuples(data, chunk_size):
     chunks = []
     if not data:
@@ -223,20 +209,37 @@ def split_list_of_tuples(data, chunk_size):
         chunks.append(chunk)
     return chunks
 
+def join_linestrings(linestrings):
+
+    multiline = linemerge(linestrings)
+    if multiline.geom_type == 'LineString':
+        return multiline
+    else:
+        return list(multiline)
+
 def _merge_trajectories(map_segments, polygon_buffer, row, inside_lines_global, outside_lines_global): 
-    for index, map_segment in enumerate(map_segments): 
-        inside_lines, outside_lines = split_and_classify(row['geometry'], map_segment, polygon_buffer) 
+    
+    merged_linestrings = join_linestrings([linestring for (_,_,_,linestring) in map_segments])
+    
+    disjoint_count = 0
+    for index, map_segment in enumerate(merged_linestrings): 
+        inside_lines, outside_lines = split_and_classify(row.geometry, map_segment, polygon_buffer) 
+        if inside_lines == []:
+            disjoint_count+=1
         inside_lines_global.append(inside_lines) if len(inside_lines) > 0 else None 
         outside_lines_global.append(outside_lines) if len(outside_lines) > 0 else None 
-    return inside_lines_global, outside_lines_global
+
+    # return inside_lines_global, outside_lines_global
+    return [], []
 
 def merge_trajectories(map_segments, polygon_buffer, row):
     with Manager() as manager:
         inside_lines_global = manager.list()
         outside_lines_global = manager.list()
 
-        print(int(len(map_segments)/10))
-        processes = split_list_of_tuples(map_segments, int(len(map_segments)/10))
+        cpu = 1 #multiprocessing.cpu_count()
+        print(int(len(map_segments)/cpu))
+        processes = split_list_of_tuples(map_segments, int(len(map_segments)/cpu))
 
         processes = [multiprocessing.Process(target=_merge_trajectories, args=(process, polygon_buffer, row, inside_lines_global, outside_lines_global)) for process in processes]
 
@@ -251,8 +254,6 @@ def merge_trajectories(map_segments, polygon_buffer, row):
         outside_lines_global = list(outside_lines_global)
 
         return inside_lines_global, outside_lines_global
-
-
 
 def construct_bbox_and_grid(gdf, cell_size=20):
     # Create a GeoDataFrame from the input data
@@ -292,8 +293,6 @@ def visualize_grid_and_linestrings(grid, linestrings):
     ax.set_aspect('equal', 'box')
     plt.show()
 
-import matplotlib.pyplot as plt
-
 def visualize_grid_gdf(grid_gdf):
     # Create a new column for the number of intersecting sessions
     grid_gdf['num_sessions'] = grid_gdf['sessions'].apply(lambda x: len(x.split('|')))
@@ -313,39 +312,48 @@ def save_map_segments(map_segments, session_name):
     map_segments_df = pd.DataFrame(map_segments, columns=['session_name', 'count', 'bearing', 'geometry'])
     map_segments_df.to_csv(os.path.join('map_segments', f'{session_name}.csv'), index=False)
 
+def add_geometries(session_name, outside_segments):
+    # read geometries from csv file if exists session_name.csv
+    if os.path.exists(os.path.join('map_segments', f'{session_name}.csv')):
+        outside_segments_df = pd.read_csv(os.path.join('map_segments', f'{session_name}.csv'))
+        outside_segments = [(session_name, count, bearing, wkt.loads(geometry)) for session_name, count, bearing, geometry in outside_segments_df.values]
+    
+    outside_segments_df = pd.DataFrame(outside_segments, columns=['session_name', 'count', 'bearing', 'geometry'])
+    outside_segments_df.to_csv(os.path.join('map_segments', f'{session_name}.csv'), index=False)
+
 def select_geometries_based_on_latest_sessions():
 
     map_segments = []
-    first_row = True
-    
-    for id, row in enumerate(result_geodf.itertuples()):
+    # if os.path.exists(os.path.join('map_segments', f'{row.sessionname}.csv')):
+    #     outside_segments_df = pd.read_csv('map_segments.csv')
+    #     outside_segments = [(session_name, count, bearing, wkt.loads(geometry)) for session_name, count, bearing, geometry in outside_segments_df.values]
+    # else:    
+    for row in result_geodf.itertuples():
         # cache
-        if os.path.exists(os.path.join('map_segments', f'{row.sessionname}.csv')):
-            outside_segments_df = pd.read_csv('map_segments.csv')
-            outside_segments = [(session_name, count, bearing, wkt.loads(geometry)) for session_name, count, bearing, geometry in outside_segments_df.values]
+        print(f'map_segments={len(map_segments)}')
+        if map_segments == []:
+            outside_lines = []
+            outside_lines.append([row.geometry])
         else:
-            if id==0:
-                # first session is the base map - all lines are outside segments
-                outside_segments = split_linestring_by_bearing(row.sessionname, row.geometry, bearing_difference_threshold=15)
-                save_map_segments(map_segments, row.sessionname)        
-            else:
-                # second session and onwards are supporting sessions - only outside segments are added to the map
-                print(f'map_segments={len(map_segments)}')
-                
-                # find outside lines based on previous map_segments and new session trajectory
-                _, outside_lines = merge_trajectories(map_segments, POLYGON_BUFFER, row)
-                    
-                # create outside_segments based on outside lines
-                for line in outside_lines:
-                    outside_segments = split_linestring_by_bearing(row.sessionname, line[0], bearing_difference_threshold=15)
-                
-                print(f'outside_map_segments={len(outside_segments)}')
+            # find outside lines based on previous map_segments and new session trajectory
+            _, outside_lines = merge_trajectories(map_segments, POLYGON_BUFFER, row)
+            
+        # create outside_segments based on outside lines
+        outside_segments = []
         
-        visualize_lines_with_buffer(outside_segments)
-        add_geometries(row.sessionname, outside_segments)
-        map_segments = map_segments + outside_segments
+        for line in outside_lines:
+            #print(f'outside_lines={line[0]}')
+            outside_segments = simplify_linestring_by_bearing(row.sessionname, line[0], bearing_difference_threshold=15)
+            print(len(outside_segments))
+            map_segments = map_segments + outside_segments
+            
+        save_map_segments(outside_segments, row.sessionname)        
+        print(f'outside_map_segments={len(outside_segments)}')
     
-
+        visualize_lines_with_buffer(outside_segments)
+    
+        add_geometries(row.sessionname, outside_segments)
+        
 def visualize_lines_with_buffer(map_segments):
     for index, (session_name, count, bearing, segment) in enumerate(map_segments):
         polygon = segment.buffer(POLYGON_BUFFER)

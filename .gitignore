@@ -161,3 +161,4 @@ cython_debug/
 csv/*
 lbem-sessions-utrecht-city-block_infer/*
 model/*
+map_segments/*
