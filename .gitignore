@@ -162,3 +162,5 @@ csv/*
 lbem-sessions-utrecht-city-block_infer/*
 model/*
 map_segments/*
+geom_gdf_old.csv
+geom_gdf.csv

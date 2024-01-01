@@ -1,14 +1,14 @@
 import os
-from shapely.geometry import LineString, box
+from datetime import datetime
+
+from shapely.geometry import LineString, box, Polygon
 from shapely.ops import unary_union, transform, split, linemerge
+from shapely.ops import cascaded_union
 from shapely import wkt
 import pyproj
 
-from shapely.geometry import LineString
 import pandas as pd
 import geopandas as gpd
-
-from datetime import datetime
 
 import multiprocessing
 from multiprocessing import Manager
@@ -17,7 +17,6 @@ import math
 import matplotlib.pyplot as plt
 
 import warnings
-
 warnings.filterwarnings('ignore')
 
 POLYGON_BUFFER = 2.0
@@ -91,6 +90,19 @@ def splitting(supporting_session_traj_wkt, buffer, reference_segment_wkt):
     split_lines = split(supporting_session_traj, poly)
     return poly, split_lines
 
+def split_and_classify2(combined_polygon, trajectory):
+
+    split_lines = split(trajectory.geometry, combined_polygon)
+    inside_lines = []
+    outside_lines = []
+    for s_line in split_lines:
+        if combined_polygon.contains(s_line):
+            inside_lines.append(s_line)
+        else:
+            outside_lines.append(s_line)
+    return inside_lines, outside_lines
+
+
 def split_and_classify(supporting_session_traj, map_segment, buffer):
     if map_segment is not None:
         session_name, count, bearing, reference_segment = map_segment
@@ -131,7 +143,7 @@ def draw_line(line, color='black', label=None):
 
 def draw_polygon(polygon, color='black', fill_color='', label=None):
     x, y = polygon.exterior.xy
-    plt.fill(x, y, fill_color, alpha=0.3)  # fill the polygon with color
+    #plt.fill(x, y, fill_color, alpha=0.3)  # fill the polygon with color
     plt.plot(x, y, color=color)  # draw the polygon outline
     
     # Add label if provided
@@ -232,7 +244,7 @@ def _merge_trajectories(map_segments, polygon_buffer, row, inside_lines_global, 
     # return inside_lines_global, outside_lines_global
     return [], []
 
-def merge_trajectories(map_segments, polygon_buffer, row):
+def find_outside_lines_depricated(map_segments, polygon_buffer, row):
     with Manager() as manager:
         inside_lines_global = manager.list()
         outside_lines_global = manager.list()
@@ -308,52 +320,6 @@ def visualize_grid_gdf(grid_gdf):
 
     plt.show()
 
-def save_map_segments(map_segments, session_name):
-    map_segments_df = pd.DataFrame(map_segments, columns=['session_name', 'count', 'bearing', 'geometry'])
-    map_segments_df.to_csv(os.path.join('map_segments', f'{session_name}.csv'), index=False)
-
-def add_geometries(session_name, outside_segments):
-    # read geometries from csv file if exists session_name.csv
-    if os.path.exists(os.path.join('map_segments', f'{session_name}.csv')):
-        outside_segments_df = pd.read_csv(os.path.join('map_segments', f'{session_name}.csv'))
-        outside_segments = [(session_name, count, bearing, wkt.loads(geometry)) for session_name, count, bearing, geometry in outside_segments_df.values]
-    
-    outside_segments_df = pd.DataFrame(outside_segments, columns=['session_name', 'count', 'bearing', 'geometry'])
-    outside_segments_df.to_csv(os.path.join('map_segments', f'{session_name}.csv'), index=False)
-
-def select_geometries_based_on_latest_sessions():
-
-    map_segments = []
-    # if os.path.exists(os.path.join('map_segments', f'{row.sessionname}.csv')):
-    #     outside_segments_df = pd.read_csv('map_segments.csv')
-    #     outside_segments = [(session_name, count, bearing, wkt.loads(geometry)) for session_name, count, bearing, geometry in outside_segments_df.values]
-    # else:    
-    for row in result_geodf.itertuples():
-        # cache
-        print(f'map_segments={len(map_segments)}')
-        if map_segments == []:
-            outside_lines = []
-            outside_lines.append([row.geometry])
-        else:
-            # find outside lines based on previous map_segments and new session trajectory
-            _, outside_lines = merge_trajectories(map_segments, POLYGON_BUFFER, row)
-            
-        # create outside_segments based on outside lines
-        outside_segments = []
-        
-        for line in outside_lines:
-            #print(f'outside_lines={line[0]}')
-            outside_segments = simplify_linestring_by_bearing(row.sessionname, line[0], bearing_difference_threshold=15)
-            print(len(outside_segments))
-            map_segments = map_segments + outside_segments
-            
-        save_map_segments(outside_segments, row.sessionname)        
-        print(f'outside_map_segments={len(outside_segments)}')
-    
-        visualize_lines_with_buffer(outside_segments)
-    
-        add_geometries(row.sessionname, outside_segments)
-        
 def visualize_lines_with_buffer(map_segments):
     for index, (session_name, count, bearing, segment) in enumerate(map_segments):
         polygon = segment.buffer(POLYGON_BUFFER)
@@ -362,16 +328,86 @@ def visualize_lines_with_buffer(map_segments):
                 
     plt.show()
 
+def save_map_segments(map_segments, session_name):
+    map_segments_df = pd.DataFrame(map_segments, columns=['session_name', 'count', 'bearing', 'geometry'])
+    map_segments_df.to_csv(os.path.join('map_segments', f'{session_name}.csv'), index=False)
+
+def add_geometries(session_name, polygon_increment):
+    # read geometries from csv file if exists session_name.csv
+    path = os.path.join('csv', f'{session_name}_lane_marking_dashed.csv')
+    if os.path.exists(path):
+        lane_marking_dashed_df = pd.read_csv(path)
+    
+    lane_marking_dashed_df['geometry'] = lane_marking_dashed_df['geometry'].apply(convert_wgs84_to_utm)
+    
+    # Create a GeoDataFrame from the pandas DataFrame
+    geodf = gpd.GeoDataFrame(lane_marking_dashed_df, geometry='geometry')
+  
+    # Create a Polygon object from the increment
+    clip_polygon = Polygon(polygon_increment)
+  
+    # Clip the GeoDataFrame with the Polygon
+    clipped_geodf = gpd.clip(geodf, clip_polygon)
+    
+    return clipped_geodf
+
+def join_polygons(polygons):
+
+    polygon_objects = [Polygon(p) for p in polygons]
+    combined_polygon = cascaded_union(polygon_objects)
+    
+    return combined_polygon
+
+def select_geometries_based_on_latest_sessions():
+    
+    total_geodf = gpd.GeoDataFrame()
+    external_lines = []
+   
+    combined_polygon = None
+    for row in result_geodf.itertuples():
+        # cache
+        start_time = datetime.now()
+        print(f'session_name={row.sessionname}')
+        print(f'map_segments={len(external_lines)}')
+        if external_lines == []:
+            external_lines = [row.geometry]
+        else:
+            # find outside lines based on previous map_segments and new session trajectory
+            _, external_lines = split_and_classify2(combined_polygon, row)
+
+        # create outside_segments based on outside lines
+        polygons = []
+        print(len(external_lines))                    
+        for line in external_lines:
+            #print(f'outside_lines={line[0]}')
+            external_segments = simplify_linestring_by_bearing(row.sessionname, line, bearing_difference_threshold=15)
+            polygons_new = [segment.buffer(POLYGON_BUFFER) for _, _, _, segment in external_segments]
+            tmp_gdf = add_geometries(row.sessionname, join_polygons(polygons_new))
+            total_geodf = pd.concat([total_geodf, tmp_gdf])
+            
+            polygons += polygons_new
+        
+        combined_polygon = join_polygons(polygons)
+        end_time = datetime.now()        
+        print(f'Execution time: {end_time - start_time}')
+
+    total_geodf.reset_index(drop=True, inplace=True)
+    total_geodf.to_csv('geom_gdf.csv', index=False)
+
+
 if __name__ == "__main__":
     
     # Example usage
+    # measure time of execution
+    start_time = datetime.now()
     csv_file_path = 'geometry_selector/utrecht_session_traj.csv'
     session_names = ['EL6W028_2022_05_21__07_54_51', 'EL6W028_2022_05_21__08_54_51', 'WY6796L_2020_04_13__13_49_43']
     result_geodf = read_and_create_geodf(csv_file_path, None, 6)
-    print(result_geodf)
+    #print(result_geodf)
     
     select_geometries_based_on_latest_sessions()
-    
+    end_time = datetime.now()
+    print(f'Total execution time: {end_time - start_time}')
         
     #polygon = segment.buffer(buffer)
     # for index, (session_name, count, bearing, segment) in enumerate(map_segments):
