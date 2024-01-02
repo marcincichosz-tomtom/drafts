@@ -332,8 +332,37 @@ def save_map_segments(map_segments, session_name):
     map_segments_df = pd.DataFrame(map_segments, columns=['session_name', 'count', 'bearing', 'geometry'])
     map_segments_df.to_csv(os.path.join('map_segments', f'{session_name}.csv'), index=False)
 
-def add_geometries(session_name, polygon_increment):
-    # read geometries from csv file if exists session_name.csv
+# def add_geometries(session_name, polygon_increment):
+#     # read geometries from csv file if exists session_name.csv
+#     path = os.path.join('csv', f'{session_name}_lane_marking_dashed.csv')
+#     if os.path.exists(path):
+#         lane_marking_dashed_df = pd.read_csv(path)
+    
+#     lane_marking_dashed_df['geometry'] = lane_marking_dashed_df['geometry'].apply(convert_wgs84_to_utm)
+    
+#     # Create a GeoDataFrame from the pandas DataFrame
+#     geodf = gpd.GeoDataFrame(lane_marking_dashed_df, geometry='geometry')
+  
+#     # Create a Polygon object from the increment
+#     clip_polygon = Polygon(polygon_increment)
+  
+#     # Clip the GeoDataFrame with the Polygon
+#     clipped_geodf = gpd.clip(geodf, clip_polygon)
+    
+#     return clipped_geodf
+
+import os
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Polygon
+import multiprocessing as mp
+import numpy as np
+
+def apply_clip(data):
+    df, polygon = data
+    return gpd.clip(df, polygon)
+
+def add_geometries(session_name, polygon_increment, row_id):
     path = os.path.join('csv', f'{session_name}_lane_marking_dashed.csv')
     if os.path.exists(path):
         lane_marking_dashed_df = pd.read_csv(path)
@@ -342,14 +371,27 @@ def add_geometries(session_name, polygon_increment):
     
     # Create a GeoDataFrame from the pandas DataFrame
     geodf = gpd.GeoDataFrame(lane_marking_dashed_df, geometry='geometry')
-  
-    # Create a Polygon object from the increment
-    clip_polygon = Polygon(polygon_increment)
-  
-    # Clip the GeoDataFrame with the Polygon
-    clipped_geodf = gpd.clip(geodf, clip_polygon)
     
-    return clipped_geodf
+    if row_id == 0:
+        return geodf
+    else:
+        # Create a Polygon object from the increment
+        clip_polygon = Polygon(polygon_increment)
+
+        # Split GeoDataFrame into chunks
+        num_parts = mp.cpu_count()
+        df_split = np.array_split(geodf, num_parts)
+
+        # Create a pool of workers
+        with mp.Pool() as pool:
+            # Apply the clip function to each chunk in the GeoDataFrame
+            results = pool.map(apply_clip, [(df, clip_polygon) for df in df_split])
+    
+        # Concatenate the results into a single GeoDataFrame
+        clipped_geodf = pd.concat(results)
+        
+        return clipped_geodf
+
 
 def join_polygons(polygons):
 
@@ -364,7 +406,7 @@ def select_geometries_based_on_latest_sessions():
     external_lines = []
    
     combined_polygon = None
-    for row in result_geodf.itertuples():
+    for row_id, row in enumerate(result_geodf.itertuples()):
         # cache
         start_time = datetime.now()
         print(f'session_name={row.sessionname}')
@@ -382,7 +424,7 @@ def select_geometries_based_on_latest_sessions():
             #print(f'outside_lines={line[0]}')
             external_segments = simplify_linestring_by_bearing(row.sessionname, line, bearing_difference_threshold=15)
             polygons_new = [segment.buffer(POLYGON_BUFFER) for _, _, _, segment in external_segments]
-            tmp_gdf = add_geometries(row.sessionname, join_polygons(polygons_new))
+            tmp_gdf = add_geometries(row.sessionname, join_polygons(polygons_new), row_id)
             total_geodf = pd.concat([total_geodf, tmp_gdf])
             
             polygons += polygons_new
